@@ -2,6 +2,13 @@ import * as child_process from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
+  LanguageClient,
+  LanguageClientOptions,
+  NotificationType,
+  ServerOptions,
+} from 'vscode-languageclient';
+
+import {
   commands,
   Disposable,
   ExtensionContext,
@@ -14,15 +21,9 @@ import {
   WorkspaceFolder,
   WorkspaceFoldersChangeEvent,
 } from 'vscode';
-import {
-  LanguageClient,
-  LanguageClientOptions,
-  NotificationType,
-  ServerOptions,
-} from 'vscode-languageclient';
-
 import { RLSConfiguration } from './configuration';
 import { SignatureHelpProvider } from './providers/signatureHelpProvider';
+import { Decorator } from './providers/typeAnnotationsProvider';
 import { checkForRls, ensureToolchain, rustupUpdate } from './rustup';
 import { startSpinner, stopSpinner } from './spinner';
 import { activateTaskProvider, Execution, runRlsCommand } from './tasks';
@@ -50,6 +51,24 @@ export async function activate(context: ExtensionContext) {
   workspace.onDidChangeWorkspaceFolders(e =>
     whenChangingWorkspaceFolders(e, context),
   );
+  window.onDidChangeActiveTextEditor(editor => {
+    if (editor === undefined || editor === null) {
+      return;
+    }
+    const decorator = Decorator.getInstance();
+    if (decorator === undefined) {
+      return;
+    }
+    console.log('Attempting to decorate after editor change.');
+    decorator.decorate(editor);
+  });
+  workspace.onDidChangeTextDocument(textDocumentChange => {
+    for (const editor of window.visibleTextEditors) {
+      if (editor.document === textDocumentChange.document) {
+        Decorator.getInstance()!.decorate(editor);
+      }
+    }
+  });
 }
 
 export async function deactivate() {
@@ -263,6 +282,7 @@ class ClientWorkspace {
       clientOptions,
     );
 
+    Decorator.getInstance(this.lc);
     const selector = this.config.multiProjectEnabled
       ? { language: 'rust', scheme: 'file', pattern }
       : { language: 'rust' };
@@ -338,12 +358,18 @@ class ClientWorkspace {
     const runningProgress: Set<string> = new Set();
     await this.lc.onReady();
     stopSpinner('RLS');
-
     this.lc.onNotification(
       new NotificationType<ProgressParams, void>('window/progress'),
       progress => {
         if (progress.done) {
           runningProgress.delete(progress.id);
+          const decorator = Decorator.getInstance();
+          if (decorator !== undefined) {
+            console.log('Starting Decoration after progress.done');
+            for (const editor of window.visibleTextEditors) {
+              decorator.decorate(editor);
+            }
+          }
         } else {
           runningProgress.add(progress.id);
         }
@@ -525,7 +551,10 @@ function configureLanguage(): Disposable {
         // e.g. /** | */ or /*! | */
         beforeText: /^\s*\/\*(\*|\!)(?!\/)([^\*]|\*(?!\/))*$/,
         afterText: /^\s*\*\/$/,
-        action: { indentAction: IndentAction.IndentOutdent, appendText: ' * ' },
+        action: {
+          indentAction: IndentAction.IndentOutdent,
+          appendText: ' * ',
+        },
       },
       {
         // Begins a multi-line comment (standard or parent doc)
